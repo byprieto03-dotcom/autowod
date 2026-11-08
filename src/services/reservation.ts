@@ -79,34 +79,49 @@ async function findReservationButton(
   const oldButtons = await page.$$(`div[data-magellan-destination="${reservationKey}"] button`);
   if (oldButtons.length > 0) return oldButtons[0];
 
-  // Web nueva: 1. Encuentra el elemento que pone EXACTAMENTE la hora, ej "17:00"
-  // 2. Sube solo 3 niveles para encontrar SU tarjeta, no toda la pagina
-  // 3. Dentro de esa tarjeta busca el boton Reservar / Avisar
-  const handle = await page.evaluateHandle((args: { time: string | null; className: string | null }) => {
-    if (!args.time) return null;
-    const all = Array.from(document.querySelectorAll('*'));
-    // Busca el nodo que es solo la hora
-    for (const timeEl of all) {
-      if ((timeEl.textContent || '').trim() !== args.time) continue;
-      // Es un nodo hoja de hora, subir 4 niveles max buscando la tarjeta
-      let card: Element | null = timeEl as Element;
-      for (let i = 0; i < 4 && card; i++) {
+  if (!time) return null;
+
+  // 1. Pulsar el filtro de hora de arriba, ej "17:00", para que solo quede esa clase en pantalla
+  const filterClicked = await page.evaluate((wantedTime: string) => {
+    const pills = Array.from(document.querySelectorAll('button, a, div, span'));
+    for (const p of pills) {
+      if ((p.textContent || '').trim() === wantedTime) {
+        // Tiene que ser un pill pequeño de filtro, no la hora grande de la tarjeta
+        const r = (p as HTMLElement).getBoundingClientRect();
+        if (r.height < 50 && r.width < 120) {
+          (p as HTMLElement).click();
+          return true;
+        }
+      }
+    }
+    return false;
+  }, time);
+  if (filterClicked) {
+    await new Promise(r => setTimeout(r, 2000));
+    await page.waitForNetworkIdle({ timeout: 5000 }).catch(() => {});
+  }
+
+  // 2. Buscar la tarjeta que pone EXACTAMENTE esa hora y ese nombre de clase
+  const handle = await page.evaluateHandle((args: { time: string; className: string | null }) => {
+    const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+    for (const btn of candidates) {
+      const btnText = (btn.textContent || '').trim().toLowerCase();
+      if (!/^(reservar|entrenar|avisar|apuntarse|reservado|cancelar|borrar|cambiar|lista de espera)/.test(btnText) && !btnText.startsWith('no avisar')) continue;
+      // Subir solo hasta la tarjeta de esa clase, max 5 niveles
+      let card: Element | null = btn as Element;
+      for (let i = 0; i < 5 && card; i++) {
         card = card.parentElement;
         if (!card) break;
-        const cardText = (card.textContent || '').toLowerCase();
-        // La tarjeta debe tener el nombre de clase
-        if (args.className && !cardText.includes(args.className.toLowerCase())) continue;
-        // Dentro de esa tarjeta debe haber UN boton de reserva
-        const btn = Array.from(card.querySelectorAll('button, a, div[role="button"]')).find(b => {
-          const t = (b.textContent || '').trim().toLowerCase();
-          return /^(reservar|entrenar|avisar|apuntarse|reservado|cancelar|borrar|cambiar|no avisar.*|lista de espera)$/.test(t) || t.startsWith('no avisar');
-        });
-        if (btn) return btn;
-        // Si la tarjeta es demasiado grande (tiene muchas horas), no vale, sigue subiendo poco
-        // Si ya tiene mas de 2 horas distintas, es que nos hemos ido a toda la pagina
+        const cardText = card.textContent || '';
+        // CANDADO: la tarjeta tiene que contener la hora pedida Y la clase pedida
+        // y NO puede ser el contenedor de toda la pagina (si tiene mas de 1 hora distinta, no vale)
         const hours = cardText.match(/\d{2}:\d{2}/g) || [];
         const uniqueHours = [...new Set(hours)];
-        if (uniqueHours.length > 1) break;
+        if (uniqueHours.length !== 1) continue;
+        if (uniqueHours[0] !== args.time) continue;
+        if (args.className && !cardText.toLowerCase().includes(args.className.toLowerCase())) continue;
+        // Esta es la tarjeta correcta
+        return btn;
       }
     }
     return null;
@@ -147,17 +162,37 @@ export async function makeReservation(
     };
   }
 
+  // CANDADO FINAL: antes de pulsar, leer de que hora es la tarjeta de este boton
+  // Si no es la hora que pedimos, NO pulsar nunca
+  const cardInfo = await reservationButton.evaluate(el => {
+    let node: Element | null = el as Element;
+    for (let i = 0; i < 6 && node; i++) {
+      node = node.parentElement;
+      if (!node) break;
+      const t = node.textContent || '';
+      const hours = t.match(/\d{2}:\d{2}/g) || [];
+      if ([...new Set(hours)].length === 1) return t.slice(0, 300);
+    }
+    return '';
+  });
+  console.log(`🔒 SAFETY CHECK ${date} - queria ${time} | tarjeta encontrada: ${cardInfo.replace(/\n/g, ' | ')}`);
+  if (!cardInfo.includes(time)) {
+    return {
+      success: false,
+      message: `🛑 SAFETY STOP: queria ${time} pero el boton era de otra hora, no he pulsado nada para ${await getDateFromUrl(page)}`,
+      weekDay,
+      time,
+    };
+  }
+
   const rawState = await getReservationState(reservationButton);
   const stateNorm = (rawState || '').trim().toLowerCase();
 
   let state: ButtonText = (rawState || '') as ButtonText;
   if (stateNorm.includes('reservar')) state = 'Entrenar' as ButtonText;
   else if (stateNorm.includes('entrenar')) state = 'Entrenar' as ButtonText;
-  else if (stateNorm.includes('avisar') || stateNorm.includes('lista de espera') || stateNorm.includes('apuntarse') || stateNorm.includes('no avisar')) {
-    // "No avisar" significa que YA estas en lista de espera
-    if (stateNorm.includes('no avisar')) state = 'Borrar' as ButtonText;
-    else state = 'Avisar' as ButtonText;
-  }
+  else if (stateNorm.includes('no avisar')) state = 'Borrar' as ButtonText;
+  else if (stateNorm.includes('avisar') || stateNorm.includes('lista de espera') || stateNorm.includes('apuntarse')) state = 'Avisar' as ButtonText;
   else if (stateNorm.includes('reservado') || stateNorm.includes('cancelar') || stateNorm.includes('borrar')) state = 'Borrar' as ButtonText;
   else if (stateNorm.includes('finalizada') || stateNorm.includes('finalizado')) state = 'Finalizada' as ButtonText;
   else if (stateNorm.includes('cambiar')) state = 'Cambiar' as ButtonText;
