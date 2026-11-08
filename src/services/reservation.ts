@@ -40,8 +40,13 @@ export function getReservationKey(time: string): string {
 }
 
 export async function goToNextDay(page: Page): Promise<void> {
-  await page.waitForSelector('a.next');
-  await page.click('a.next');
+  // FIX: no pulsar "siguiente" porque salta de semana en semana (lunes a lunes)
+  // Ir directo a la URL del dia siguiente sumando 1 dia = 86400 segundos
+  const url = page.url();
+  const currentSeconds = Number(url.split('=')[1]);
+  const nextSeconds = currentSeconds + 86400;
+  const currentDomain = new URL(url).origin;
+  await page.goto(`${currentDomain}/athlete/reservas.aspx?t=${nextSeconds}`);
   await page.waitForNetworkIdle({ timeout: 5000 }).catch(() => {});
   await new Promise(r => setTimeout(r, 2000));
 }
@@ -81,12 +86,10 @@ async function findReservationButton(
 
   if (!time) return null;
 
-  // 1. Pulsar el filtro de hora de arriba, ej "17:00", para que solo quede esa clase en pantalla
   const filterClicked = await page.evaluate((wantedTime: string) => {
     const pills = Array.from(document.querySelectorAll('button, a, div, span'));
     for (const p of pills) {
       if ((p.textContent || '').trim() === wantedTime) {
-        // Tiene que ser un pill pequeño de filtro, no la hora grande de la tarjeta
         const r = (p as HTMLElement).getBoundingClientRect();
         if (r.height < 50 && r.width < 120) {
           (p as HTMLElement).click();
@@ -101,26 +104,21 @@ async function findReservationButton(
     await page.waitForNetworkIdle({ timeout: 5000 }).catch(() => {});
   }
 
-  // 2. Buscar la tarjeta que pone EXACTAMENTE esa hora y ese nombre de clase
   const handle = await page.evaluateHandle((args: { time: string; className: string | null }) => {
     const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
     for (const btn of candidates) {
       const btnText = (btn.textContent || '').trim().toLowerCase();
       if (!/^(reservar|entrenar|avisar|apuntarse|reservado|cancelar|borrar|cambiar|lista de espera)/.test(btnText) && !btnText.startsWith('no avisar')) continue;
-      // Subir solo hasta la tarjeta de esa clase, max 5 niveles
       let card: Element | null = btn as Element;
       for (let i = 0; i < 5 && card; i++) {
         card = card.parentElement;
         if (!card) break;
         const cardText = card.textContent || '';
-        // CANDADO: la tarjeta tiene que contener la hora pedida Y la clase pedida
-        // y NO puede ser el contenedor de toda la pagina (si tiene mas de 1 hora distinta, no vale)
         const hours = cardText.match(/\d{2}:\d{2}/g) || [];
         const uniqueHours = [...new Set(hours)];
         if (uniqueHours.length !== 1) continue;
         if (uniqueHours[0] !== args.time) continue;
         if (args.className && !cardText.toLowerCase().includes(args.className.toLowerCase())) continue;
-        // Esta es la tarjeta correcta
         return btn;
       }
     }
@@ -162,8 +160,6 @@ export async function makeReservation(
     };
   }
 
-  // CANDADO FINAL: antes de pulsar, leer de que hora es la tarjeta de este boton
-  // Si no es la hora que pedimos, NO pulsar nunca
   const cardInfo = await reservationButton.evaluate(el => {
     let node: Element | null = el as Element;
     for (let i = 0; i < 6 && node; i++) {
@@ -323,4 +319,4 @@ export async function processReservations(
   console.log(`📊 Summary -> booked: ${booked}, waitlist: ${waitlisted}, already booked: ${alreadyBooked}, skipped (no time): ${skipped}, other: ${other}`);
   writeJobSummary(dayResults, { booked, waitlisted, alreadyBooked, skipped, other });
   return dayResults;
-    }
+}
