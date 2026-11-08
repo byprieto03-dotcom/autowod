@@ -25,7 +25,7 @@ export async function goToReservations(page: Page): Promise<void> {
   const currentDomain = new URL(currentUrl).origin;
   await page.goto(`${currentDomain}/athlete/reservas.aspx?t=${todayInSeconds}`);
   await page.waitForNetworkIdle({ timeout: 8000 }).catch(() => {});
-  await new Promise(r => setTimeout(r, 2000));
+  await new Promise(r => setTimeout(r, 3000));
 }
 
 export async function getReservationState(
@@ -43,7 +43,7 @@ export async function goToNextDay(page: Page): Promise<void> {
   await page.waitForSelector('a.next');
   await page.click('a.next');
   await page.waitForNetworkIdle({ timeout: 5000 }).catch(() => {});
-  await new Promise(r => setTimeout(r, 1500));
+  await new Promise(r => setTimeout(r, 2000));
 }
 
 export async function getWeekDayFromUrl(page: Page): Promise<string> {
@@ -76,23 +76,35 @@ async function findReservationButton(
   className: string | null,
   time: string | null
 ): Promise<ElementHandle<Element> | null> {
+  // 1. Web vieja
   const oldButtons = await page.$$(`div[data-magellan-destination="${reservationKey}"] button`);
   if (oldButtons.length > 0) return oldButtons[0];
 
-  const buttons = await page.$$('button, a.btn, input[type="button"], input[type="submit"]');
-  for (const button of buttons) {
-    const info = await button.evaluate(el => {
-      const container = el.closest('div')?.parentElement?.textContent || el.parentElement?.textContent || '';
-      const ownText = (el.textContent || '').trim().toLowerCase();
-      const cardText = (el.closest('div')?.parentElement?.textContent || '').toLowerCase();
-      return { ownText, cardText, container: container.toLowerCase() };
-    });
-    if (!/reservar|entrenar|avisar|apuntarse|lista de espera|reservado|cancelar|borrar|cambiar/.test(info.ownText)) continue;
-    if (time && !info.cardText.includes(time) && !info.container.includes(time)) continue;
-    if (className && !info.cardText.includes(className.toLowerCase()) && !info.container.includes(className.toLowerCase())) continue;
-    return button;
-  }
-  return null;
+  // 2. Web nueva: buscar en todo el DOM subiendo por los padres
+  const handle = await page.evaluateHandle((args: { time: string | null; className: string | null }) => {
+    const all = Array.from(document.querySelectorAll('button, a, input, div[role="button"], span'));
+    for (const el of all) {
+      const txt = (el.textContent || '').trim().toLowerCase();
+      // El boton debe ser de reserva y no ser un filtro de hora
+      if (!/^(reservar|entrenar|avisar|apuntarse|reservado|cancelar|borrar|cambiar|lista de espera)$/.test(txt)) continue;
+      // Subir hasta 6 padres buscando un bloque que contenga hora + clase
+      let node: Element | null = el as Element;
+      for (let i = 0; i < 6 && node; i++) {
+        const blockText = (node.textContent || '').toLowerCase();
+        const hasTime = !args.time || blockText.includes(args.time.toLowerCase());
+        const hasClass = !args.className || blockText.includes(args.className.toLowerCase());
+        // El bloque debe ser suficientemente grande para ser la tarjeta, no solo el boton
+        if (hasTime && hasClass && blockText.length > txt.length + 5) {
+          return el;
+        }
+        node = node.parentElement;
+      }
+    }
+    return null;
+  }, { time, className });
+
+  const element = handle.asElement();
+  return element as ElementHandle<Element> | null;
 }
 
 export async function makeReservation(
@@ -113,6 +125,10 @@ export async function makeReservation(
       date,
     };
   }
+
+  // DEBUG: que nos diga que ve el bot en esta pagina
+  const debugText = await page.evaluate(() => document.body.innerText.slice(0, 1500));
+  console.log(`🔎 DEBUG ${date} - page text: ${debugText.replace(/\n/g, ' | ')}`);
 
   const reservationKey = getReservationKey(time);
   const reservationButton = await findReservationButton(page, reservationKey, className, time);
@@ -263,4 +279,4 @@ export async function processReservations(
   console.log(`📊 Summary -> booked: ${booked}, waitlist: ${waitlisted}, already booked: ${alreadyBooked}, skipped (no time): ${skipped}, other: ${other}`);
   writeJobSummary(dayResults, { booked, waitlisted, alreadyBooked, skipped, other });
   return dayResults;
-    }
+}
