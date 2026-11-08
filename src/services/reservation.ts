@@ -25,7 +25,6 @@ export async function goToReservations(page: Page): Promise<void> {
   const currentDomain = new URL(currentUrl).origin;
   await page.goto(`${currentDomain}/athlete/reservas.aspx?t=${todayInSeconds}`);
   await page.waitForNetworkIdle({ timeout: 8000 }).catch(() => {});
-  // La web nueva carga las clases con JS, damos un respiro
   await new Promise(r => setTimeout(r, 2000));
 }
 
@@ -77,12 +76,9 @@ async function findReservationButton(
   className: string | null,
   time: string | null
 ): Promise<ElementHandle<Element> | null> {
-  // 1. Intento viejo por compatibilidad
   const oldButtons = await page.$$(`div[data-magellan-destination="${reservationKey}"] button`);
   if (oldButtons.length > 0) return oldButtons[0];
 
-  // 2. Web nueva Wodbuster: buscar por tarjeta que contenga hora + nombre de clase
-  // En la web nueva cada clase es una tarjeta con texto tipo "WOD 17:00 ... Reservar"
   const buttons = await page.$$('button, a.btn, input[type="button"], input[type="submit"]');
   for (const button of buttons) {
     const info = await button.evaluate(el => {
@@ -91,11 +87,8 @@ async function findReservationButton(
       const cardText = (el.closest('div')?.parentElement?.textContent || '').toLowerCase();
       return { ownText, cardText, container: container.toLowerCase() };
     });
-    // Ignorar botones que no son de reserva
     if (!/reservar|entrenar|avisar|apuntarse|lista de espera|reservado|cancelar|borrar|cambiar/.test(info.ownText)) continue;
-    // La tarjeta debe contener la hora, ej: "17:00"
     if (time && !info.cardText.includes(time) && !info.container.includes(time)) continue;
-    // Si hay nombre de clase, debe contenerlo, ej: "wod"
     if (className && !info.cardText.includes(className.toLowerCase()) && !info.container.includes(className.toLowerCase())) continue;
     return button;
   }
@@ -136,15 +129,13 @@ export async function makeReservation(
   const rawState = await getReservationState(reservationButton);
   const stateNorm = (rawState || '').trim().toLowerCase();
 
-  // Normalizar web nueva -> estados viejos que ya entiende el resto del codigo
-  // Reservar = Entrenar, Lista de espera / Avisar = Avisar, Reservado / Cancelar / Borrar = Borrar
-  let state: string = rawState || '';
-  if (stateNorm.includes('reservar')) state = 'Entrenar';
-  else if (stateNorm.includes('entrenar')) state = 'Entrenar';
-  else if (stateNorm.includes('avisar') || stateNorm.includes('lista de espera') || stateNorm.includes('apuntarse')) state = 'Avisar';
-  else if (stateNorm.includes('reservado') || stateNorm.includes('cancelar') || stateNorm.includes('borrar')) state = 'Borrar';
-  else if (stateNorm.includes('finalizada') || stateNorm.includes('finalizado')) state = 'Finalizada';
-  else if (stateNorm.includes('cambiar')) state = 'Cambiar';
+  let state: ButtonText = (rawState || '') as ButtonText;
+  if (stateNorm.includes('reservar')) state = 'Entrenar' as ButtonText;
+  else if (stateNorm.includes('entrenar')) state = 'Entrenar' as ButtonText;
+  else if (stateNorm.includes('avisar') || stateNorm.includes('lista de espera') || stateNorm.includes('apuntarse')) state = 'Avisar' as ButtonText;
+  else if (stateNorm.includes('reservado') || stateNorm.includes('cancelar') || stateNorm.includes('borrar')) state = 'Borrar' as ButtonText;
+  else if (stateNorm.includes('finalizada') || stateNorm.includes('finalizado')) state = 'Finalizada' as ButtonText;
+  else if (stateNorm.includes('cambiar')) state = 'Cambiar' as ButtonText;
 
   const result: ReservationResult = {
     success: true,
@@ -152,7 +143,7 @@ export async function makeReservation(
     weekDay,
     date,
     time,
-    state: state as any,
+    state,
   };
 
   switch (state) {
