@@ -76,28 +76,37 @@ async function findReservationButton(
   className: string | null,
   time: string | null
 ): Promise<ElementHandle<Element> | null> {
-  // 1. Web vieja
   const oldButtons = await page.$$(`div[data-magellan-destination="${reservationKey}"] button`);
   if (oldButtons.length > 0) return oldButtons[0];
 
-  // 2. Web nueva: buscar en todo el DOM subiendo por los padres
+  // Web nueva: 1. Encuentra el elemento que pone EXACTAMENTE la hora, ej "17:00"
+  // 2. Sube solo 3 niveles para encontrar SU tarjeta, no toda la pagina
+  // 3. Dentro de esa tarjeta busca el boton Reservar / Avisar
   const handle = await page.evaluateHandle((args: { time: string | null; className: string | null }) => {
-    const all = Array.from(document.querySelectorAll('button, a, input, div[role="button"], span'));
-    for (const el of all) {
-      const txt = (el.textContent || '').trim().toLowerCase();
-      // El boton debe ser de reserva y no ser un filtro de hora
-      if (!/^(reservar|entrenar|avisar|apuntarse|reservado|cancelar|borrar|cambiar|lista de espera)$/.test(txt)) continue;
-      // Subir hasta 6 padres buscando un bloque que contenga hora + clase
-      let node: Element | null = el as Element;
-      for (let i = 0; i < 6 && node; i++) {
-        const blockText = (node.textContent || '').toLowerCase();
-        const hasTime = !args.time || blockText.includes(args.time.toLowerCase());
-        const hasClass = !args.className || blockText.includes(args.className.toLowerCase());
-        // El bloque debe ser suficientemente grande para ser la tarjeta, no solo el boton
-        if (hasTime && hasClass && blockText.length > txt.length + 5) {
-          return el;
-        }
-        node = node.parentElement;
+    if (!args.time) return null;
+    const all = Array.from(document.querySelectorAll('*'));
+    // Busca el nodo que es solo la hora
+    for (const timeEl of all) {
+      if ((timeEl.textContent || '').trim() !== args.time) continue;
+      // Es un nodo hoja de hora, subir 4 niveles max buscando la tarjeta
+      let card: Element | null = timeEl as Element;
+      for (let i = 0; i < 4 && card; i++) {
+        card = card.parentElement;
+        if (!card) break;
+        const cardText = (card.textContent || '').toLowerCase();
+        // La tarjeta debe tener el nombre de clase
+        if (args.className && !cardText.includes(args.className.toLowerCase())) continue;
+        // Dentro de esa tarjeta debe haber UN boton de reserva
+        const btn = Array.from(card.querySelectorAll('button, a, div[role="button"]')).find(b => {
+          const t = (b.textContent || '').trim().toLowerCase();
+          return /^(reservar|entrenar|avisar|apuntarse|reservado|cancelar|borrar|cambiar|no avisar.*|lista de espera)$/.test(t) || t.startsWith('no avisar');
+        });
+        if (btn) return btn;
+        // Si la tarjeta es demasiado grande (tiene muchas horas), no vale, sigue subiendo poco
+        // Si ya tiene mas de 2 horas distintas, es que nos hemos ido a toda la pagina
+        const hours = cardText.match(/\d{2}:\d{2}/g) || [];
+        const uniqueHours = [...new Set(hours)];
+        if (uniqueHours.length > 1) break;
       }
     }
     return null;
@@ -126,10 +135,6 @@ export async function makeReservation(
     };
   }
 
-  // DEBUG: que nos diga que ve el bot en esta pagina
-  const debugText = await page.evaluate(() => document.body.innerText.slice(0, 1500));
-  console.log(`🔎 DEBUG ${date} - page text: ${debugText.replace(/\n/g, ' | ')}`);
-
   const reservationKey = getReservationKey(time);
   const reservationButton = await findReservationButton(page, reservationKey, className, time);
 
@@ -148,7 +153,11 @@ export async function makeReservation(
   let state: ButtonText = (rawState || '') as ButtonText;
   if (stateNorm.includes('reservar')) state = 'Entrenar' as ButtonText;
   else if (stateNorm.includes('entrenar')) state = 'Entrenar' as ButtonText;
-  else if (stateNorm.includes('avisar') || stateNorm.includes('lista de espera') || stateNorm.includes('apuntarse')) state = 'Avisar' as ButtonText;
+  else if (stateNorm.includes('avisar') || stateNorm.includes('lista de espera') || stateNorm.includes('apuntarse') || stateNorm.includes('no avisar')) {
+    // "No avisar" significa que YA estas en lista de espera
+    if (stateNorm.includes('no avisar')) state = 'Borrar' as ButtonText;
+    else state = 'Avisar' as ButtonText;
+  }
   else if (stateNorm.includes('reservado') || stateNorm.includes('cancelar') || stateNorm.includes('borrar')) state = 'Borrar' as ButtonText;
   else if (stateNorm.includes('finalizada') || stateNorm.includes('finalizado')) state = 'Finalizada' as ButtonText;
   else if (stateNorm.includes('cambiar')) state = 'Cambiar' as ButtonText;
@@ -279,4 +288,4 @@ export async function processReservations(
   console.log(`📊 Summary -> booked: ${booked}, waitlist: ${waitlisted}, already booked: ${alreadyBooked}, skipped (no time): ${skipped}, other: ${other}`);
   writeJobSummary(dayResults, { booked, waitlisted, alreadyBooked, skipped, other });
   return dayResults;
-}
+    }
